@@ -46,7 +46,7 @@ use tower_http::{
     cors::{Any, CorsLayer},
     trace::TraceLayer,
 };
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 use nvsim::{
     pipeline::{Pipeline, PipelineConfig},
@@ -54,12 +54,19 @@ use nvsim::{
     scene::Scene,
 };
 
+mod auth;
+
 #[derive(Parser, Debug)]
 #[command(name = "nvsim-server", version)]
 struct Args {
     #[arg(long, default_value = "127.0.0.1:7878")]
     listen: SocketAddr,
-    #[arg(long, default_value = "*")]
+    /// CORS allowed-origin (or comma-separated list). Default is the
+    /// local dashboard dev URL. Pass `*` only with `NVSIM_ALLOW_OPEN=1`;
+    /// otherwise the server refuses to start because a wildcard origin
+    /// combined with the permissive `PUT /api/scene`/`POST /api/run`
+    /// surface lets any page in the browser drive this pipeline.
+    #[arg(long, default_value = "http://localhost:5173")]
     allowed_origin: String,
 }
 
@@ -167,17 +174,69 @@ async fn main() {
 
     let args = Args::parse();
     let state = AppState::new();
-    let cors = CorsLayer::new()
-        .allow_origin(if args.allowed_origin == "*" {
-            tower_http::cors::AllowOrigin::any()
-        } else {
-            args.allowed_origin
-                .parse::<axum::http::HeaderValue>()
-                .map(tower_http::cors::AllowOrigin::exact)
-                .unwrap_or_else(|_| tower_http::cors::AllowOrigin::any())
-        })
-        .allow_headers(Any)
-        .allow_methods(Any);
+
+    // ── Auth ─────────────────────────────────────────────────────────────
+    let auth_state = auth::AuthState::from_env();
+    let allow_open = std::env::var("NVSIM_ALLOW_OPEN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+
+    let listen_is_loopback = args.listen.ip().is_loopback();
+    if !listen_is_loopback && !auth_state.is_enabled() && !allow_open {
+        error!(
+            "REFUSING TO START: --listen={} is non-loopback but NVSIM_API_TOKEN is unset.\n\
+             The control plane (PUT /api/scene, PUT /api/config, POST /api/run) is unsafe to\n\
+             expose without auth. Either set NVSIM_API_TOKEN=<token>, use a loopback listen\n\
+             address, or set NVSIM_ALLOW_OPEN=1 to override (NOT recommended).",
+            args.listen
+        );
+        std::process::exit(2);
+    }
+    if auth_state.is_enabled() {
+        info!("API auth: bearer-token enforcement ON for /api/* and /ws/* (NVSIM_API_TOKEN set)");
+    } else if listen_is_loopback {
+        info!("API auth: OFF — loopback listen only. Set NVSIM_API_TOKEN before exposing.");
+    } else {
+        warn!("API auth: OFF — NVSIM_ALLOW_OPEN=1; pipeline control plane is anonymous.");
+    }
+
+    // ── CORS ─────────────────────────────────────────────────────────────
+    // Wildcard origin is gated behind NVSIM_ALLOW_OPEN. The default is the
+    // local Vite dashboard origin so a normal dev workflow still works.
+    let cors = if args.allowed_origin.trim() == "*" {
+        if !allow_open {
+            error!(
+                "REFUSING TO START: --allowed-origin=* requires NVSIM_ALLOW_OPEN=1.\n\
+                 Wildcard CORS lets any web page in the user's browser drive this server.\n\
+                 Pass a specific origin (e.g. http://localhost:5173) or set the env override."
+            );
+            std::process::exit(2);
+        }
+        warn!("CORS: wildcard origin in use (NVSIM_ALLOW_OPEN=1)");
+        CorsLayer::new()
+            .allow_origin(tower_http::cors::AllowOrigin::any())
+            .allow_headers(Any)
+            .allow_methods(Any)
+    } else {
+        let origins: Vec<axum::http::HeaderValue> = args
+            .allowed_origin
+            .split(',')
+            .filter_map(|s| s.trim().parse::<axum::http::HeaderValue>().ok())
+            .collect();
+        if origins.is_empty() {
+            error!(
+                "REFUSING TO START: --allowed-origin={:?} parsed to zero valid origins. \
+                 Pass a comma-separated list of fully-qualified HTTP origins.",
+                args.allowed_origin
+            );
+            std::process::exit(2);
+        }
+        info!("CORS: allowed origins = {:?}", origins);
+        CorsLayer::new()
+            .allow_origin(tower_http::cors::AllowOrigin::list(origins))
+            .allow_headers(Any)
+            .allow_methods(Any)
+    };
 
     let app = Router::new()
         .route("/api/health", get(health))
@@ -194,6 +253,10 @@ async fn main() {
         .route("/api/export-proof", post(export_proof))
         .route("/ws/stream", get(ws_handler))
         .with_state(state)
+        .layer(axum::middleware::from_fn_with_state(
+            auth_state.clone(),
+            auth::require_bearer,
+        ))
         .layer(cors)
         .layer(TraceLayer::new_for_http());
 

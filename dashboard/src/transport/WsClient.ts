@@ -49,9 +49,25 @@ function toWsUrl(baseUrl: string): string {
   return baseUrl.replace(/^http/, 'ws');
 }
 
+export interface WsClientOptions {
+  /**
+   * Bearer token to authenticate against a hardened server. When set:
+   *   - REST fetches send `Authorization: Bearer <token>`.
+   *   - The WebSocket handshake passes `bearer.<token>` as a
+   *     `Sec-WebSocket-Protocol` entry. Browsers cannot set arbitrary
+   *     headers on `new WebSocket(...)`; this is the standard workaround,
+   *     also used by the Kubernetes kubectl-exec endpoint.
+   *
+   * Leave undefined for unauthenticated servers (loopback / trusted-lab
+   * deployments only).
+   */
+  token?: string;
+}
+
 export class WsClient implements NvsimClient {
   private baseUrl: string;
   private wsUrl: string;
+  private token: string | null;
   private ws: WebSocket | null = null;
   private bootInfo: WsBootInfo | null = null;
   private frameSubs = new Set<(b: MagFrameBatch) => void>();
@@ -62,15 +78,24 @@ export class WsClient implements NvsimClient {
   private fpsCount = 0;
 
   /** @param baseUrl e.g. `http://localhost:7878` */
-  constructor(baseUrl: string) {
+  constructor(baseUrl: string, opts: WsClientOptions = {}) {
     this.baseUrl = baseUrl.replace(/\/$/, '');
     this.wsUrl = `${toWsUrl(this.baseUrl)}/ws/stream`;
+    this.token = opts.token && opts.token.length > 0 ? opts.token : null;
+  }
+
+  private authHeaders(): Record<string, string> {
+    return this.token ? { authorization: `Bearer ${this.token}` } : {};
   }
 
   private async json<T>(path: string, init?: RequestInit): Promise<T> {
     const res = await fetch(`${this.baseUrl}${path}`, {
       ...init,
-      headers: { 'content-type': 'application/json', ...(init?.headers ?? {}) },
+      headers: {
+        'content-type': 'application/json',
+        ...this.authHeaders(),
+        ...(init?.headers ?? {}),
+      },
     });
     if (!res.ok) throw new Error(`${path}: ${res.status} ${res.statusText}`);
     return (await res.json()) as T;
@@ -91,7 +116,14 @@ export class WsClient implements NvsimClient {
 
   private openWs(): void {
     if (this.ws) return;
-    const ws = new WebSocket(this.wsUrl);
+    // Browsers can't set Authorization on `new WebSocket(...)`. Pass the
+    // bearer token as a subprotocol entry instead — the server (Axum
+    // middleware in nvsim-server/src/auth.rs) checks
+    // `Sec-WebSocket-Protocol: bearer.<token>` alongside the standard
+    // Authorization header.
+    const ws = this.token
+      ? new WebSocket(this.wsUrl, [`bearer.${this.token}`])
+      : new WebSocket(this.wsUrl);
     ws.binaryType = 'arraybuffer';
     ws.onopen = () => {
       this.eventSubs.forEach((s) =>
@@ -191,7 +223,10 @@ export class WsClient implements NvsimClient {
   }
 
   async exportProofBundle(): Promise<Blob> {
-    const text = await fetch(`${this.baseUrl}/api/export-proof`, { method: 'POST' }).then((r) => r.text());
+    const text = await fetch(`${this.baseUrl}/api/export-proof`, {
+      method: 'POST',
+      headers: this.authHeaders(),
+    }).then((r) => r.text());
     return new Blob([text], { type: 'application/json' });
   }
 
