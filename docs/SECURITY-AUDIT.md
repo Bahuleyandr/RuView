@@ -21,9 +21,85 @@ follow-up pass that has hardware.
 | 5  | UDP CSI ingest hardcoded to `0.0.0.0`, ignoring `--bind-addr`; anyone on LAN can spoof frames | Medium | Fixed: UDP receiver now honors `--bind-addr` |
 | 6  | `example.env` shipped with `SECRET_KEY=your-secret-key-here-...`, `ENABLE_AUTHENTICATION=false`, wildcard CORS/hosts, `MOCK_HARDWARE=true`, `RELOAD=true`, etc. | Medium | Fixed: secure defaults, dangerous toggles isolated in a clearly-marked section |
 | 7  | Dashboard transport had no way to send a bearer token | Medium | Fixed: `WsClient(baseUrl, { token })` sends `Authorization` + `Sec-WebSocket-Protocol: bearer.<token>` |
+| 8  | Dependency vulnerabilities (`cargo audit` / `npm audit`) | Mixed | Mostly fixed (see "Dependency sweep" below); 7 residuals blocked behind transitive pins, off the hot path |
 
 Out-of-scope (informational, no code change):
 - Repo provenance: 53k stars on a 7-month-old project by an author with ~7.8k followers is wildly inconsistent with realistic organic growth. The codebase is heavily AI-scaffolded. Treat the star count as marketing, not a quality signal.
+
+## Dependency sweep — 2026-05-14
+
+Ran `cargo audit` (v0.22.1) on the workspace and `npm audit` on each
+JS root.
+
+### Rust — fixed
+
+* `quinn-proto 0.11.13 → 0.11.14` — DoS in Quinn endpoints
+  (`RUSTSEC-2026-0037`). Pulled in by `wifi-densepose-hardware`.
+* `rustls-webpki 0.103.9 → 0.103.13` — 4 advisories
+  (`RUSTSEC-2026-{0049,0098,0099,0104}`): CRL parsing panic, wildcard
+  name-constraint bypass, URI name-constraint bypass, faulty CRL
+  Distribution-Point matching.
+
+Both bumps applied via `cargo update -p <crate>@<old>` (no `Cargo.toml`
+edits required — the workspace's semver ranges already permitted the
+patches).
+
+### Rust — residual (7 advisories, blocked behind transitive pins)
+
+* **`rustls-webpki 0.101.7`** — 4 advisories (same set as 0.103.x).
+  Pulled in via `reqwest 0.11.27 → rustls 0.21 → rustls-webpki 0.101`.
+  Bumping requires moving `reqwest` to 0.12 (workspace-wide change).
+  **Hot-path risk**: the only crate calling `reqwest` is
+  `wifi-densepose-desktop` (`commands/ota.rs`, `commands/wasm.rs`),
+  which connects to ESP32 nodes over **plain HTTP on port 8032** —
+  no TLS handshake happens, so the cert-validation bugs aren't
+  reachable from RuView code. The advisory still counts because the
+  crate is present, but exploitation would require the desktop crate
+  to issue an HTTPS request, which it does not.
+* **`rustls-webpki 0.102.8`** — 3 advisories. Pulled in via
+  `midstreamer-quic 0.1.0 → rustls 0.22 → rustls-webpki 0.102`. Used
+  only by `wifi-densepose-hardware`'s experimental QUIC aggregator
+  path (`esp32/quic_transport.rs`). Bumping requires
+  `midstreamer-quic` to update — that's a third-party crate from the
+  `ruvnet` org. Until then, the residual risk is only relevant if
+  the QUIC aggregator is enabled with TLS to peers outside the
+  trusted LAN, which is not the default configuration.
+
+`cargo audit` also flags 29 unmaintained/unsound advisories (`gtk-rs`
+chain on the desktop crate, `bincode`, `paste`, `atomic-polyfill`,
+`fxhash`, `rkyv 0.8`, etc.). None are exploitable on their own; they
+are notices that the upstream maintainer has moved on. Not actioned
+this pass — would require coordinated upstream bumps.
+
+### npm — fixed
+
+* `dashboard/`: `npm audit fix` cleared 5 of 10 vulns. Remaining 5 are
+  dev-only in the `vitest → vite → esbuild` chain (`GHSA-67mh-4wv8-2f99`
+  esbuild dev-server CORS). `npm audit --omit=dev` reports **0
+  vulnerabilities** in the production bundle. The dev-only chain
+  requires `npm audit fix --force` which bumps vitest 2→3 (breaking
+  test harness changes) — left for a separate test-suite-migration PR.
+* `v2/crates/wifi-densepose-desktop/ui/`: `npm audit fix` cleared all
+  3 vulns (Vite dev-server path traversal + arbitrary file read).
+  **0 vulnerabilities** remain.
+* `ui/mobile/`: `npm audit fix` cleared 6 of 15 vulns. Remaining 9
+  (5 low, 4 moderate) are in the `expo/cli → @expo/metro-config →
+  postcss` build-tooling chain. Fixable only by `npm audit fix --force`,
+  which advances `expo` past its current minor (55 → 56+) — a
+  React Native major-version migration with non-trivial breakage.
+  None are runtime vulnerabilities on the shipped app.
+
+### How to re-run
+
+```bash
+# Rust
+cd v2 && cargo audit
+
+# JS
+cd dashboard && npm audit
+cd ui/mobile && npm audit
+cd v2/crates/wifi-densepose-desktop/ui && npm audit
+```
 
 ## What this branch changed
 
