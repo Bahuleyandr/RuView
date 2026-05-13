@@ -7,7 +7,7 @@ import { WasmClient } from './transport/WasmClient';
 import { WsClient } from './transport/WsClient';
 import type { NvsimClient, MagFrameBatch } from './transport/NvsimClient';
 import {
-  setClient, transport, wsUrl, connected, transportError,
+  setClient, transport, wsUrl, apiToken, connected, transportError,
   theme, density, motionReduced,
   pushLog, expectedWitness, framesEmitted, fps, lastB, bMag,
   pushTrace, pushStripBar, lastFrame, sceneJson, witnessHex,
@@ -51,13 +51,16 @@ function applyMotion(reduced: boolean): void {
   if (positionsSaved && Array.isArray(positionsSaved)) scenePositions.value = positionsSaved;
   effect(() => { void kvSet('scene-positions', scenePositions.value); });
 
-  // Restore WS URL preference + transport mode
+  // Restore WS URL preference + transport mode + API token
   const savedWsUrl = (await kvGet<string>('wsUrl')) ?? '';
   if (savedWsUrl) wsUrl.value = savedWsUrl;
   const savedTransport = (await kvGet<'wasm' | 'ws'>('transport')) ?? 'wasm';
   transport.value = savedTransport;
+  const savedToken = (await kvGet<string>('apiToken')) ?? '';
+  if (savedToken) apiToken.value = savedToken;
   effect(() => { void kvSet('wsUrl', wsUrl.value); });
   effect(() => { void kvSet('transport', transport.value); });
+  effect(() => { void kvSet('apiToken', apiToken.value); });
 
   // Per-app runtime scratch state + history buffer (defined first so the
   // onFrames callback can close over them).
@@ -117,7 +120,9 @@ function applyMotion(reduced: boolean): void {
       if (activeClient) await activeClient.close();
       const want = transport.value;
       if (want === 'ws' && wsUrl.value.trim()) {
-        const c = new WsClient(wsUrl.value.trim());
+        const c = new WsClient(wsUrl.value.trim(), {
+          token: apiToken.value.trim() || undefined,
+        });
         const info = await c.boot();
         activeClient = c;
         connected.value = true;
@@ -158,7 +163,7 @@ function applyMotion(reduced: boolean): void {
   // React to transport-mode flips: tear down + re-boot.
   let bootInProgress = false;
   effect(() => {
-    transport.value; wsUrl.value;
+    transport.value; wsUrl.value; apiToken.value;
     if (bootInProgress) return;
     bootInProgress = true;
     void bootTransport().finally(() => { bootInProgress = false; });

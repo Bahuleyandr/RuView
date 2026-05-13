@@ -3635,8 +3635,8 @@ async fn info_page() -> Html<String> {
 
 // ── UDP receiver task ────────────────────────────────────────────────────────
 
-async fn udp_receiver_task(state: SharedState, udp_port: u16) {
-    let addr = format!("0.0.0.0:{udp_port}");
+async fn udp_receiver_task(state: SharedState, bind_ip: std::net::IpAddr, udp_port: u16) {
+    let addr = format!("{bind_ip}:{udp_port}");
     let socket = match UdpSocket::bind(&addr).await {
         Ok(s) => {
             info!("UDP listening on {addr} for ESP32 CSI frames");
@@ -4658,9 +4658,9 @@ async fn main() {
     }
 
     info!("WiFi-DensePose Sensing Server (Rust + Axum + RuVector)");
-    info!("  HTTP:      http://localhost:{}", args.http_port);
-    info!("  WebSocket: ws://localhost:{}/ws/sensing", args.ws_port);
-    info!("  UDP:       0.0.0.0:{} (ESP32 CSI)", args.udp_port);
+    info!("  HTTP:      http://{}:{}", args.bind_addr, args.http_port);
+    info!("  WebSocket: ws://{}:{}/ws/sensing", args.bind_addr, args.ws_port);
+    info!("  UDP:       {}:{} (ESP32 CSI)", args.bind_addr, args.udp_port);
     info!("  UI path:   {}", args.ui_path.display());
     info!("  Source:    {}", args.source);
 
@@ -4843,10 +4843,56 @@ async fn main() {
         },
     }));
 
+    // ADR-050: Parse bind address once, use for all listeners
+    let bind_ip: std::net::IpAddr = args.bind_addr.parse()
+        .expect("Invalid --bind-addr (use 127.0.0.1 or 0.0.0.0)");
+
+    // #443 + security-audit: bearer-token auth on `/api/v1/*` AND `/ws/*`.
+    // Empty / unset `RUVIEW_API_TOKEN` ⇒ middleware is a no-op. Set ⇒
+    // every gated request must carry `Authorization: Bearer <token>` (or, for
+    // browser WebSockets, `Sec-WebSocket-Protocol: bearer.<token>`).
+    let bearer_auth_state = wifi_densepose_sensing_server::bearer_auth::AuthState::from_env();
+
+    // Fail-closed: refuse to bind to a non-loopback address without a token.
+    // The biometric WebSocket and write endpoints (model load, training start,
+    // calibration, recording) are not safe to expose to a LAN anonymously.
+    // Operators who really want an open LAN deployment must set
+    // `RUVIEW_ALLOW_OPEN=1` explicitly — that flag is meant to leave an
+    // audit trail in process env, not to be a normal default.
+    let allow_open = std::env::var("RUVIEW_ALLOW_OPEN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if !bind_ip.is_loopback() && !bearer_auth_state.is_enabled() && !allow_open {
+        error!(
+            "REFUSING TO START: bind-addr={bind_ip} is non-loopback but RUVIEW_API_TOKEN is unset.\n\
+             This server's WebSocket streams live biometric telemetry (presence, breathing rate,\n\
+             heart rate) and accepts write endpoints. To proceed, choose one:\n\
+               * set RUVIEW_API_TOKEN=<strong-token> to enable bearer auth (recommended), or\n\
+               * use --bind-addr 127.0.0.1 to keep the server loopback-only, or\n\
+               * set RUVIEW_ALLOW_OPEN=1 to override (NOT recommended outside a trusted lab)."
+        );
+        std::process::exit(2);
+    }
+
+    if bearer_auth_state.is_enabled() {
+        info!(
+            "API auth: bearer-token enforcement ON for /api/v1/* and /ws/* (RUVIEW_API_TOKEN set)"
+        );
+    } else if bind_ip.is_loopback() {
+        info!(
+            "API auth: OFF — loopback bind only. Set RUVIEW_API_TOKEN=<token> before exposing this server."
+        );
+    } else {
+        warn!(
+            "API auth: OFF and bind-addr is {bind_ip}. RUVIEW_ALLOW_OPEN is set — server will start \
+             but biometric data is reachable anonymously on this network."
+        );
+    }
+
     // Start background tasks based on source
     match source {
         "esp32" => {
-            tokio::spawn(udp_receiver_task(state.clone(), args.udp_port));
+            tokio::spawn(udp_receiver_task(state.clone(), bind_ip, args.udp_port));
             tokio::spawn(broadcast_tick_task(state.clone(), args.tick_ms));
         }
         "wifi" => {
@@ -4857,35 +4903,17 @@ async fn main() {
         }
     }
 
-    // ADR-050: Parse bind address once, use for all listeners
-    let bind_ip: std::net::IpAddr = args.bind_addr.parse()
-        .expect("Invalid --bind-addr (use 127.0.0.1 or 0.0.0.0)");
-
-    // #443: optional bearer-token auth on `/api/v1/*`. `RUVIEW_API_TOKEN`
-    // unset/empty ⇒ middleware is a no-op (LAN-mode default preserved); set ⇒
-    // every `/api/v1/*` request must carry `Authorization: Bearer <token>`.
-    let bearer_auth_state = wifi_densepose_sensing_server::bearer_auth::AuthState::from_env();
-    if bearer_auth_state.is_enabled() {
-        info!(
-            "API auth: bearer-token enforcement ON for /api/v1/* (RUVIEW_API_TOKEN set)"
-        );
-        if bind_ip.is_unspecified() {
-            warn!(
-                "API auth ON but bind-addr is {} — consider --bind-addr 127.0.0.1 for LAN-only deployments",
-                bind_ip
-            );
-        }
-    } else {
-        info!(
-            "API auth: OFF — /api/v1/* is unauthenticated. Set RUVIEW_API_TOKEN=<token> to enforce bearer auth."
-        );
-    }
-
-    // WebSocket server on dedicated port (8765)
+    // WebSocket server on dedicated port (8765). Apply the strict bearer-auth
+    // middleware so /ws/sensing is gated when RUVIEW_API_TOKEN is set;
+    // /health stays open for orchestrator probes.
     let ws_state = state.clone();
     let ws_app = Router::new()
         .route("/ws/sensing", get(ws_sensing_handler))
         .route("/health", get(health))
+        .layer(axum::middleware::from_fn_with_state(
+            bearer_auth_state.clone(),
+            wifi_densepose_sensing_server::bearer_auth::require_bearer_strict,
+        ))
         .with_state(ws_state);
 
     let ws_addr = SocketAddr::from((bind_ip, args.ws_port));
@@ -4967,13 +4995,12 @@ async fn main() {
             axum::http::header::CACHE_CONTROL,
             HeaderValue::from_static("no-cache, no-store, must-revalidate"),
         ))
-        // Opt-in bearer-token auth on `/api/v1/*` (#443). When `RUVIEW_API_TOKEN`
-        // is unset/empty the middleware is a no-op — the default stays
-        // LAN-mode-friendly. `/health*`, `/ws/sensing`, and `/ui/*` are never
-        // gated (orchestrator probes + local browsers).
+        // Bearer-token auth on `/api/v1/*` AND `/ws/sensing` when
+        // `RUVIEW_API_TOKEN` is set. `/health*`, `/`, and `/ui/*` stay
+        // open so orchestrator probes and the UI shell still load.
         .layer(axum::middleware::from_fn_with_state(
             bearer_auth_state.clone(),
-            wifi_densepose_sensing_server::bearer_auth::require_bearer,
+            wifi_densepose_sensing_server::bearer_auth::require_bearer_strict,
         ))
         .with_state(state.clone());
 

@@ -126,7 +126,7 @@ pub use integration::{
 };
 
 pub use api::{
-    create_router, AppState,
+    apply_bearer_auth, create_router, AppState, AuthState,
 };
 
 pub use ml::{

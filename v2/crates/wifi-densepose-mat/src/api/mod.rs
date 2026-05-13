@@ -32,6 +32,7 @@
 //! ### WebSocket
 //! - `WS /ws/mat/stream` - Real-time survivor and alert stream
 
+pub mod auth;
 pub mod dto;
 pub mod handlers;
 pub mod error;
@@ -43,21 +44,39 @@ use axum::{
     routing::{get, post},
 };
 
+pub use auth::{apply_bearer_auth, AuthState, API_TOKEN_ENV as AUTH_TOKEN_ENV};
 pub use dto::*;
 pub use error::ApiError;
 pub use state::AppState;
 
 /// Create the MAT API router with all endpoints.
 ///
+/// # Security
+///
+/// **The returned router has no authentication of its own.** Before serving
+/// it on a network-reachable address, callers must EITHER:
+///
+/// 1. Wrap it with [`apply_bearer_auth`] using an [`AuthState`] populated
+///    from the `MAT_API_TOKEN` environment variable, OR
+/// 2. Mount it behind a network boundary that does the auth (mTLS sidecar,
+///    reverse proxy with header check, etc.), OR
+/// 3. Only bind to `127.0.0.1` on a single-user machine.
+///
+/// The endpoints accept disaster-event writes (`POST /api/v1/mat/events`,
+/// `POST /api/v1/mat/scan/control`) and the `/ws/mat/stream` WebSocket
+/// streams live survivor and alert telemetry. Anonymous access in
+/// production is not appropriate.
+///
 /// # Example
 ///
 /// ```rust,no_run
-/// use wifi_densepose_mat::api::{create_router, AppState};
+/// use wifi_densepose_mat::api::{create_router, apply_bearer_auth, AppState, AuthState};
 ///
 /// #[tokio::main]
 /// async fn main() {
 ///     let state = AppState::new();
-///     let app = create_router(state);
+///     let auth = AuthState::from_env(); // reads MAT_API_TOKEN
+///     let app = apply_bearer_auth(create_router(state), auth);
 ///     // ... serve with axum
 /// }
 /// ```
