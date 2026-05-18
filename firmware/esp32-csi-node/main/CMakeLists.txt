@@ -12,7 +12,12 @@ set(SRCS
     # Vendored Ed25519 (see third_party/monocypher/README.md).
     # Required by rvf_parser.c for real signature verification of WASM
     # uploads. Replaces the broken SHA-256-with-public-key-prefix scheme.
+    # monocypher-ed25519.c is the SHA-512 (RFC 8032) variant that
+    # interoperates with libsodium / Python `cryptography` / openssl etc.
+    # monocypher.c stays in the build because the optional module depends
+    # on its scalar arithmetic primitives.
     "third_party/monocypher/monocypher.c"
+    "third_party/monocypher/monocypher-ed25519.c"
 )
 
 set(REQUIRES "")
