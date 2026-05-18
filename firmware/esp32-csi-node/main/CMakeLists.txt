@@ -9,6 +9,10 @@ set(SRCS
     "rv_feature_state.c"
     "rv_mesh.c"
     "adaptive_controller.c"
+    # Vendored Ed25519 (see third_party/monocypher/README.md).
+    # Required by rvf_parser.c for real signature verification of WASM
+    # uploads. Replaces the broken SHA-256-with-public-key-prefix scheme.
+    "third_party/monocypher/monocypher.c"
 )
 
 set(REQUIRES "")
@@ -26,6 +30,6 @@ endif()
 
 idf_component_register(
     SRCS ${SRCS}
-    INCLUDE_DIRS "."
+    INCLUDE_DIRS "." "third_party/monocypher"
     REQUIRES ${REQUIRES}
 )

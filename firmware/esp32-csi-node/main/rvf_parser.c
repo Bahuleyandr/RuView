@@ -12,6 +12,11 @@
 #include "esp_log.h"
 #include "mbedtls/sha256.h"
 
+/* Vendored Ed25519 implementation. See main/third_party/monocypher/README.md
+ * for provenance, license, and the rationale for vendoring rather than
+ * depending on Kconfig-gated mbedTLS EdDSA support. */
+#include "monocypher.h"
+
 static const char *TAG = "rvf";
 
 bool rvf_is_rvf(const uint8_t *data, uint32_t data_len)
@@ -184,56 +189,34 @@ esp_err_t rvf_verify_signature(const rvf_parsed_t *parsed, const uint8_t *data,
     uint32_t signed_len = RVF_HEADER_SIZE + RVF_MANIFEST_SIZE + parsed->wasm_len;
 
     /*
-     * Ed25519 verification.
+     * Real Ed25519 verification via monocypher (see main/third_party/monocypher/).
      *
-     * ESP-IDF v5.2 mbedtls does NOT include Ed25519 (Curve25519 is
-     * for ECDH/X25519 only).  We use a SHA-256-HMAC integrity check:
+     * History: the original implementation here computed
+     *     expected = SHA-256(pubkey || header || manifest || wasm)
+     * and compared the first 32 bytes of the "signature" field to that hash.
+     * Because the public key is, by definition, public, *anyone* who possessed
+     * it could recompute the hash and produce a "valid signature" for arbitrary
+     * payload bytes. That is not a signature scheme — it provides only tamper
+     * detection, not authentication of the publisher, and the inline comment
+     * acknowledging this misled reviewers into thinking it was sufficient.
      *
-     *   expected = SHA-256(pubkey || signed_region)
+     * crypto_eddsa_check verifies a 64-byte Ed25519 signature over the
+     * signed region using only the 32-byte public key, returning 0 on
+     * success and -1 on any failure. The implementation is constant-time
+     * and allocation-free. Only the holder of the matching 32-byte private
+     * key can produce a signature that verifies — which is the actual
+     * security property we wanted all along.
      *
-     * The first 32 bytes of the 64-byte signature field must match.
-     * This provides tamper detection and key-binding — a different
-     * pubkey produces a different expected hash, so unauthorized
-     * publishers cannot forge a valid signature.
-     *
-     * For full Ed25519 (NaCl-style), enable CONFIG_MBEDTLS_EDDSA_C
-     * or link TweetNaCl.  The RVF builder should match this scheme.
+     * Signer side: scripts/sign-rvf.py uses pynacl/cryptography to produce
+     * matching signatures, and the public key is provisioned to the device
+     * via `provision.py --wasm-pubkey <hex>` (read into g_nvs_config.wasm_pubkey).
      */
-    uint8_t hash_input_prefix[32];
-    memcpy(hash_input_prefix, pubkey, 32);
-
-    /* Compute SHA-256(pubkey || header+manifest+wasm). */
-    mbedtls_sha256_context ctx;
-    mbedtls_sha256_init(&ctx);
-    int ret = mbedtls_sha256_starts(&ctx, 0);
-    if (ret != 0) {
-        mbedtls_sha256_free(&ctx);
-        return ESP_FAIL;
-    }
-    ret = mbedtls_sha256_update(&ctx, hash_input_prefix, 32);
-    if (ret != 0) {
-        mbedtls_sha256_free(&ctx);
-        return ESP_FAIL;
-    }
-    ret = mbedtls_sha256_update(&ctx, data, signed_len);
-    if (ret != 0) {
-        mbedtls_sha256_free(&ctx);
-        return ESP_FAIL;
-    }
-
-    uint8_t expected[32];
-    ret = mbedtls_sha256_finish(&ctx, expected);
-    mbedtls_sha256_free(&ctx);
-    if (ret != 0) {
-        return ESP_FAIL;
-    }
-
-    /* Compare first 32 bytes of signature against expected hash. */
-    if (memcmp(parsed->signature, expected, 32) != 0) {
-        ESP_LOGE(TAG, "Signature verification failed — key mismatch or tampered");
+    int rc = crypto_eddsa_check(parsed->signature, pubkey, data, signed_len);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Ed25519 signature verification failed");
         return ESP_ERR_INVALID_CRC;
     }
 
-    ESP_LOGI(TAG, "Signature verified (SHA-256-HMAC keyed integrity)");
+    ESP_LOGI(TAG, "Ed25519 signature verified");
     return ESP_OK;
 }

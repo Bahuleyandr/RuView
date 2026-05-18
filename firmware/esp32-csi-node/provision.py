@@ -95,6 +95,16 @@ def build_nvs_csv(args):
         writer.writerow(["swarm_hb", "data", "u16", str(args.swarm_hb)])
     if args.swarm_ingest is not None:
         writer.writerow(["swarm_ingest", "data", "u16", str(args.swarm_ingest)])
+    # Ed25519 public key for verifying signed WASM uploads (rvf_parser.c).
+    # 32 bytes, hex-encoded on the CLI, stored as a binary blob in NVS so the
+    # firmware can read it directly into g_nvs_config.wasm_pubkey.
+    if args.wasm_pubkey is not None:
+        pk = bytes.fromhex(args.wasm_pubkey)
+        if len(pk) != 32:
+            raise ValueError(
+                f"--wasm-pubkey must be 32 bytes hex (64 chars), got {len(pk)} bytes"
+            )
+        writer.writerow(["wasm_pubkey", "data", "hex2bin", pk.hex()])
     return buf.getvalue()
 
 
@@ -206,6 +216,10 @@ def main():
     parser.add_argument("--zone", type=str, help="Zone name for this node (e.g. lobby, hallway)")
     parser.add_argument("--swarm-hb", type=int, help="Swarm heartbeat interval in seconds (default 30)")
     parser.add_argument("--swarm-ingest", type=int, help="Swarm vector ingest interval in seconds (default 5)")
+    # Ed25519 public key for verifying signed WASM uploads (rvf_parser.c).
+    parser.add_argument("--wasm-pubkey", type=str,
+                        help="Ed25519 public key (64-char hex, 32 bytes) for verifying signed WASM uploads. "
+                             "Pair with: python scripts/sign-rvf.py gen-keypair")
     parser.add_argument("--dry-run", action="store_true", help="Generate NVS binary but don't flash")
     parser.add_argument("--force-partial", action="store_true",
                         help="Allow partial config without WiFi credentials. "
@@ -223,6 +237,7 @@ def main():
         args.vital_int is not None, args.subk_count is not None,
         args.channel is not None, args.filter_mac is not None,
         args.seed_url is not None, args.zone is not None,
+        args.wasm_pubkey is not None,
     ])
     if not has_value:
         parser.error("At least one config value must be specified")
