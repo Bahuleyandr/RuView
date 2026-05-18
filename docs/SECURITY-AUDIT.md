@@ -10,7 +10,7 @@ follow-up pass that has hardware.
 
 | # | Finding | Severity | Status on this branch |
 |---|---------|----------|-----------------------|
-| 1 | RVF "signature" is a keyed hash where the key is the public key (`rvf_verify_signature`) — anyone with the pubkey can forge a valid signature | **Critical** | **Phase A landed (code complete, host-tested)** — see "Ed25519 migration" section below. Phase B (compile firmware + on-device flash test) pending. |
+| 1 | RVF "signature" is a keyed hash where the key is the public key (`rvf_verify_signature`) — anyone with the pubkey can forge a valid signature | **Critical** | **Fixed and verified on hardware (2026-05-14).** See "Ed25519 migration" section below for both phases. |
 | 2a | REST API auth opt-in; default open (sensing-server) | High | Fixed: fail-closed bind check, strict middleware also gates `/ws/*` |
 | 2b | OTA endpoint accepts unsigned firmware when no PSK is provisioned | High | Deferred (firmware) |
 | 2c | `nvsim-server` had no auth at all + wildcard CORS default | High | Fixed: `NVSIM_API_TOKEN`, fail-closed non-loopback + fail-closed wildcard CORS |
@@ -215,25 +215,50 @@ wire-compatible):
 | Verify with 1 byte tampered in WASM region | FAIL | ✅ FAIL (exit 1) |
 | `inspect` shows 216-byte layout (32+96+24+64) | matches | ✅ matches |
 
-**Phase B (needs ESP-IDF + ESP32-S3):**
+**Phase B (verified on hardware, 2026-05-14):**
 
-1. Install ESP-IDF v5.4 (heavy; ~2 GB). Build firmware with the new
-   monocypher source. Should compile cleanly — no new Kconfig needed.
-2. Flash to a board **other than the running known-good (board #1)**
-   so we keep a fallback.
-3. Provision: `provision.py … --wasm-pubkey <hex-from-sign-rvf.py>`.
-4. Upload-test matrix:
-   * Properly-signed RVF (`POST /wasm/upload`) → expect HTTP 200 + module loads
-   * Tampered RVF (flip a payload byte) → expect HTTP 403 + log "Ed25519 signature verification failed"
-   * RVF "signed" with the old SHA-256-prefix scheme → expect HTTP 403 (old scheme produces a 32-byte garbage prefix; Ed25519 verify will reject)
-   * Raw `.wasm` upload with `CONFIG_WASM_SKIP_SIGNATURE` unset → already rejected by existing code path (now meaningful)
-5. Stack check: ed25519 verify uses ~1.5 KB stack; the `httpd` task
-   defaults to 4 KB. If we see "Stack canary watchpoint triggered",
-   raise `CONFIG_HTTPD_TASK_STACK_SIZE` in menuconfig.
+Executed on a second ESP32-S3-DevKitC-1-N16R8 (board #2, MAC
+`44:1b:f6:ff:94:ac`) while board #1 stayed untouched as a known-good
+fallback. Toolchain installed at `D:\Dev\Tools\esp-idf` + `D:\Dev\Tools\Espressif`;
+firmware built via `idf.py build` (debug, 1.10 MB binary, 47% free in
+the 2 MB OTA slot), flashed via `esptool write_flash` at the standard
+8 MB OTA offsets, then provisioned with `provision.py --port COM4
+--wasm-pubkey <hex>` (the new flag added in this PR).
 
-Until Phase B lands, the bench-tested code path is correct but
-unflashed. Until then, treat `POST /wasm/upload` as having the
-authentication strength of the OTA PSK alone (item 2 below).
+**Bug found on first contact** — the Phase A code as-shipped failed
+to verify even valid signatures. Root cause: monocypher's default
+`crypto_eddsa_check` is "EdDSA with curve25519 + **BLAKE2b**" (a
+non-standard hash), not RFC 8032 PureEd25519. Python's `cryptography`
+library uses SHA-512, so signatures never cross-verified. Fix: pulled
+in the optional `monocypher-ed25519.{c,h}` module from the same
+Monocypher 4.0.2 release (the SHA-512 / RFC 8032 variant), changed the
+include and the call from `crypto_eddsa_check` → `crypto_ed25519_check`,
+documented the trap in `main/third_party/monocypher/README.md` so the
+next person who touches this code can't fall into it. Cross-tier
+round-trip tests miss this class of bug, which is exactly why hardware
+validation matters.
+
+Final upload-test matrix on board #2 (post-fix):
+
+| # | Input | Firmware log | HTTP | Security property |
+|---|-------|--------------|------|-------------------|
+| 1 | Valid signed RVF | `Ed25519 signature verified` | 500 (WASM3 missing — unrelated, see below) | ✅ Crypto path accepts |
+| 2 | RVF with 1 byte flipped in manifest region | `Ed25519 signature verification failed` | 403 | ✅ Tamper detection works |
+| 3 | RVF with 1 byte flipped in WASM payload | `RVF parse failed: ESP_ERR_INVALID_CRC` | 400 | ✅ Build-hash check works (catches this earlier than the signature check) |
+| 4 | RVF signed by a different Ed25519 key | `Ed25519 signature verification failed` | 403 | ✅ **The original audit attack (pubkey-forgery) is now blocked** |
+| 5 | Raw `.wasm` without RVF wrapper | `Raw WASM upload rejected (signature verification enabled)` | 403 | ✅ Wrapper required when `CONFIG_WASM_SKIP_SIGNATURE` is unset |
+
+Test 1 returning 500 is unrelated to the security fix — the device
+accepts the signature, parses the RVF, then `wasm_runtime_load`
+returns `ESP_ERR_NOT_SUPPORTED` because the WASM3 interpreter wasn't
+compiled in (`W wasm_rt: WASM Tier 3 disabled (WASM3 not available)`
+on boot). The crypto gate is what this audit cared about; downstream
+WASM execution is a separate Kconfig.
+
+Stack budget held: no stack canary watchpoints triggered during any
+of the 5 uploads. SHA-512 EdDSA verify on Xtensa LX7 @ 240 MHz takes
+~30 ms in the test fixtures (37-byte payload) — comfortably under the
+httpd task's 4 KB default stack.
 
 ### 2. Make OTA auth required by default — HIGH
 

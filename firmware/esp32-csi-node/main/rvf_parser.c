@@ -14,8 +14,17 @@
 
 /* Vendored Ed25519 implementation. See main/third_party/monocypher/README.md
  * for provenance, license, and the rationale for vendoring rather than
- * depending on Kconfig-gated mbedTLS EdDSA support. */
-#include "monocypher.h"
+ * depending on Kconfig-gated mbedTLS EdDSA support.
+ *
+ * IMPORTANT: we deliberately use monocypher-ed25519.h (the "optional"
+ * module) rather than monocypher.h itself. The default
+ * crypto_eddsa_check() in monocypher.h is "EdDSA with curve25519 +
+ * BLAKE2b" — a non-standard hash choice that does NOT interoperate
+ * with RFC 8032 Ed25519 (libsodium, NaCl, Python cryptography, openssl,
+ * etc.). The optional monocypher-ed25519 module provides the
+ * SHA-512 variant that matches the standard and what every signer
+ * tool produces. */
+#include "monocypher-ed25519.h"
 
 static const char *TAG = "rvf";
 
@@ -200,18 +209,19 @@ esp_err_t rvf_verify_signature(const rvf_parsed_t *parsed, const uint8_t *data,
      * detection, not authentication of the publisher, and the inline comment
      * acknowledging this misled reviewers into thinking it was sufficient.
      *
-     * crypto_eddsa_check verifies a 64-byte Ed25519 signature over the
-     * signed region using only the 32-byte public key, returning 0 on
-     * success and -1 on any failure. The implementation is constant-time
-     * and allocation-free. Only the holder of the matching 32-byte private
-     * key can produce a signature that verifies — which is the actual
-     * security property we wanted all along.
+     * crypto_ed25519_check (RFC 8032 PureEd25519 with SHA-512) verifies a
+     * 64-byte Ed25519 signature over the signed region using only the
+     * 32-byte public key, returning 0 on success and -1 on any failure.
+     * The implementation is constant-time and allocation-free. Only the
+     * holder of the matching 32-byte private key can produce a signature
+     * that verifies — the actual security property we wanted all along.
      *
-     * Signer side: scripts/sign-rvf.py uses pynacl/cryptography to produce
-     * matching signatures, and the public key is provisioned to the device
-     * via `provision.py --wasm-pubkey <hex>` (read into g_nvs_config.wasm_pubkey).
+     * Signer side: scripts/sign-rvf.py uses Python's `cryptography` lib
+     * (which implements RFC 8032), and the public key is provisioned to the
+     * device via `provision.py --wasm-pubkey <hex>` (read into
+     * g_nvs_config.wasm_pubkey).
      */
-    int rc = crypto_eddsa_check(parsed->signature, pubkey, data, signed_len);
+    int rc = crypto_ed25519_check(parsed->signature, pubkey, data, signed_len);
     if (rc != 0) {
         ESP_LOGE(TAG, "Ed25519 signature verification failed");
         return ESP_ERR_INVALID_CRC;

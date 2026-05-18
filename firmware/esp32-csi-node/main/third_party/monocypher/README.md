@@ -18,7 +18,26 @@ gymnastics during onboarding.
 |------|--------|-------|
 | `monocypher.c` | [GitHub v4.0.2](https://github.com/LoupVaillant/Monocypher/blob/4.0.2/src/monocypher.c) | ~3,000 LoC, no allocations, no external deps |
 | `monocypher.h` | [GitHub v4.0.2](https://github.com/LoupVaillant/Monocypher/blob/4.0.2/src/monocypher.h) | Public API |
+| `monocypher-ed25519.c` | [GitHub v4.0.2 (optional)](https://github.com/LoupVaillant/Monocypher/blob/4.0.2/src/optional/monocypher-ed25519.c) | **SHA-512 EdDSA** — RFC 8032 PureEd25519, interop-compatible with libsodium / Python `cryptography` / openssl |
+| `monocypher-ed25519.h` | [GitHub v4.0.2 (optional)](https://github.com/LoupVaillant/Monocypher/blob/4.0.2/src/optional/monocypher-ed25519.h) | Public API for the SHA-512 variant |
 | `LICENSE` | [GitHub v4.0.2](https://github.com/LoupVaillant/Monocypher/blob/4.0.2/LICENCE.md) | BSD-2-Clause OR CC-0 (dual-licensed) |
+
+## ⚠️ SHA-512 vs BLAKE2b trap
+
+Monocypher's *default* `crypto_eddsa_check` (in `monocypher.h`) uses **BLAKE2b**
+as the EdDSA hash — a non-standard choice that does NOT interoperate with
+any other common Ed25519 implementation. RFC 8032 specifies SHA-512.
+
+**Always use `crypto_ed25519_check` from `monocypher-ed25519.h`** for
+signatures that need to round-trip with Python's `cryptography` library,
+libsodium, NaCl, openssl, or anything else that calls itself "Ed25519".
+`rvf_parser.c` enforces this via its `#include` choice.
+
+Symptom of using the wrong variant: every signature verification fails
+with no obvious error, even though the keypair, message bytes, and
+signature length all look correct. We hit exactly this during Phase B
+hardware bring-up and discovered the mismatch from the silent verify
+failures on the device.
 
 ## Upgrading
 
