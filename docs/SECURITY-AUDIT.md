@@ -10,7 +10,7 @@ follow-up pass that has hardware.
 
 | # | Finding | Severity | Status on this branch |
 |---|---------|----------|-----------------------|
-| 1 | RVF "signature" is a keyed hash where the key is the public key (`rvf_verify_signature`) — anyone with the pubkey can forge a valid signature | **Critical** | **Deferred (firmware, needs ESP32-S3 to validate)** |
+| 1 | RVF "signature" is a keyed hash where the key is the public key (`rvf_verify_signature`) — anyone with the pubkey can forge a valid signature | **Critical** | **Phase A landed (code complete, host-tested)** — see "Ed25519 migration" section below. Phase B (compile firmware + on-device flash test) pending. |
 | 2a | REST API auth opt-in; default open (sensing-server) | High | Fixed: fail-closed bind check, strict middleware also gates `/ws/*` |
 | 2b | OTA endpoint accepts unsigned firmware when no PSK is provisioned | High | Deferred (firmware) |
 | 2c | `nvsim-server` had no auth at all + wildcard CORS default | High | Fixed: `NVSIM_API_TOKEN`, fail-closed non-loopback + fail-closed wildcard CORS |
@@ -175,42 +175,65 @@ cd v2/crates/wifi-densepose-desktop/ui && npm audit
 
 ## Items still TODO (need ESP32-S3 hardware)
 
-### 1. Replace the RVF "signature" with real Ed25519 — CRITICAL
+### 1. Replace the RVF "signature" with real Ed25519 — CRITICAL — Phase A landed
 
-File: [`firmware/esp32-csi-node/main/rvf_parser.c`](../firmware/esp32-csi-node/main/rvf_parser.c), function `rvf_verify_signature`.
+**Was:** `firmware/esp32-csi-node/main/rvf_parser.c::rvf_verify_signature`
+computed `SHA-256(pubkey || header || manifest || wasm)` and compared
+the first 32 bytes of the "signature" field to it. Public keys are
+public, so anyone could recompute the hash and forge a "valid"
+signature for arbitrary WASM.
 
-The current code computes:
+**Now (Phase A — code complete):**
 
-```c
-expected = SHA-256(pubkey || header || manifest || wasm)
-```
+* Vendored Monocypher v4.0.2 at `firmware/esp32-csi-node/main/third_party/monocypher/`
+  (single .c + .h, public domain, ~100 KB). License + provenance in
+  the directory's README.md. Chosen over Kconfig-gated mbedTLS EdDSA
+  for reproducibility across ESP-IDF versions.
+* `rvf_verify_signature` rewritten to call
+  `crypto_eddsa_check(parsed->signature, pubkey, data, signed_len)` —
+  real RFC 8032 Ed25519 verify, constant-time, allocation-free.
+* `firmware/esp32-csi-node/main/CMakeLists.txt` updated to include
+  the monocypher source and include path.
+* `firmware/esp32-csi-node/provision.py` gained `--wasm-pubkey <hex>`
+  to write the 32-byte Ed25519 public key into NVS (`csi_cfg/wasm_pubkey`),
+  which the firmware already reads into `g_nvs_config.wasm_pubkey`.
+* New `scripts/sign-rvf.py` produces real signed RVF containers
+  matching the firmware's byte layout:
+  * `gen-keypair --out keys.json` — generate Ed25519 keypair
+  * `sign --key keys.json --wasm foo.wasm --module-name foo --out foo.rvf`
+  * `verify --key keys.json --rvf foo.rvf` — host-side roundtrip check
+  * `inspect --rvf foo.rvf` — pretty-print header + manifest
 
-and compares the first 32 bytes of the "signature" field. The pubkey
-is, by definition, public — anyone who has it can recompute the hash
-and produce a "valid signature" for arbitrary WASM. The inline comment
-admits this is a SHA-256-HMAC integrity check but then claims it
-prevents unauthorized publishers, which is materially false.
+Smoke-tested round-trip (with `cryptography` Python lib on signer
+side, monocypher on verifier side — both implement RFC 8032 so they're
+wire-compatible):
 
-**Migration plan:**
-1. Add a `tweetnacl` (or `monocypher`) dependency to the IDF component
-   manifest — both implement Ed25519 in <2 KB of code without
-   dynamic allocation and run fine on ESP32-S3.
-2. Change the RVF format: the 64-byte `signature` field already
-   matches Ed25519's signature length; no on-wire change needed.
-   The pubkey provisioning path (`provision.py --wasm-pubkey`) stays.
-3. In `rvf_verify_signature`, replace the SHA-256 step with
-   `crypto_sign_verify_detached(sig, msg, msg_len, pubkey)`.
-4. Re-issue any in-the-wild RVF modules with real Ed25519 signatures
-   produced by the same key. The builder script in `scripts/` already
-   has a placeholder for this.
-5. Validate end-to-end on hardware: build firmware, flash, attempt to
-   upload (a) a properly-signed RVF (must succeed), (b) a tampered
-   RVF (must fail), (c) an RVF "signed" with the old SHA-256 scheme
-   (must fail).
+| Scenario | Expected | Result |
+|---|---|---|
+| Sign + verify with same key | PASS | ✅ PASS |
+| Verify with wrong keypair | FAIL | ✅ FAIL (exit 1) |
+| Verify with 1 byte tampered in WASM region | FAIL | ✅ FAIL (exit 1) |
+| `inspect` shows 216-byte layout (32+96+24+64) | matches | ✅ matches |
 
-Until this lands, treat `POST /wasm/upload` on port 8032 as an
-authenticated-only-by-OTA-PSK arbitrary-code-execution endpoint, and
-keep the OTA PSK provisioned (see item 2).
+**Phase B (needs ESP-IDF + ESP32-S3):**
+
+1. Install ESP-IDF v5.4 (heavy; ~2 GB). Build firmware with the new
+   monocypher source. Should compile cleanly — no new Kconfig needed.
+2. Flash to a board **other than the running known-good (board #1)**
+   so we keep a fallback.
+3. Provision: `provision.py … --wasm-pubkey <hex-from-sign-rvf.py>`.
+4. Upload-test matrix:
+   * Properly-signed RVF (`POST /wasm/upload`) → expect HTTP 200 + module loads
+   * Tampered RVF (flip a payload byte) → expect HTTP 403 + log "Ed25519 signature verification failed"
+   * RVF "signed" with the old SHA-256-prefix scheme → expect HTTP 403 (old scheme produces a 32-byte garbage prefix; Ed25519 verify will reject)
+   * Raw `.wasm` upload with `CONFIG_WASM_SKIP_SIGNATURE` unset → already rejected by existing code path (now meaningful)
+5. Stack check: ed25519 verify uses ~1.5 KB stack; the `httpd` task
+   defaults to 4 KB. If we see "Stack canary watchpoint triggered",
+   raise `CONFIG_HTTPD_TASK_STACK_SIZE` in menuconfig.
+
+Until Phase B lands, the bench-tested code path is correct but
+unflashed. Until then, treat `POST /wasm/upload` as having the
+authentication strength of the OTA PSK alone (item 2 below).
 
 ### 2. Make OTA auth required by default — HIGH
 
