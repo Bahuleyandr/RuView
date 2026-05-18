@@ -116,7 +116,12 @@ export class WebSocketService {
 
   async createWebSocketWithTimeout(url) {
     return new Promise((resolve, reject) => {
-      const ws = new WebSocket(url);
+      // Bearer auth via Sec-WebSocket-Protocol subprotocol when running
+      // against a hardened sensing-server. See ui/app.js _bootstrapAuthToken().
+      const token = (typeof window !== 'undefined' && window.__RUVIEW_BEARER_TOKEN__) || '';
+      const ws = token
+        ? new WebSocket(url, [`bearer.${token}`])
+        : new WebSocket(url);
       const timeout = setTimeout(() => {
         ws.close();
         reject(new Error(`Connection timeout after ${this.config.connectionTimeout}ms`));
