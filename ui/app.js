@@ -17,14 +17,50 @@ class WiFiDensePoseApp {
     this.isInitialized = false;
   }
 
+  // Bootstrap bearer token from URL hash or localStorage. Reads
+  //   #token=<RUVIEW_API_TOKEN>
+  // and applies it to apiService (Authorization: Bearer ...) plus stashes
+  // it on window.__RUVIEW_BEARER_TOKEN__ where the WS services pick it up
+  // as the `Sec-WebSocket-Protocol: bearer.<token>` subprotocol. Token is
+  // persisted to localStorage on first use so a refresh works without the
+  // hash. The hash itself is stripped from the URL bar after parsing to
+  // avoid leaking via screenshots or browser history.
+  _bootstrapAuthToken() {
+    const HASH_PREFIX = '#token=';
+    const STORAGE_KEY = 'ruview.api_token';
+    let token = '';
+    try {
+      const hash = (typeof window !== 'undefined' && window.location && window.location.hash) || '';
+      if (hash.startsWith(HASH_PREFIX)) {
+        token = decodeURIComponent(hash.slice(HASH_PREFIX.length));
+        try { localStorage.setItem(STORAGE_KEY, token); } catch (_) {}
+        // Strip token from URL bar
+        try { history.replaceState(null, '', window.location.pathname + window.location.search); } catch (_) {}
+      } else {
+        try { token = localStorage.getItem(STORAGE_KEY) || ''; } catch (_) {}
+      }
+    } catch (_) { /* ignore */ }
+    if (token) {
+      apiService.setAuthToken(token);
+      if (typeof window !== 'undefined') window.__RUVIEW_BEARER_TOKEN__ = token;
+      console.info('[Auth] Bearer token loaded (REST + WS subprotocol enabled)');
+    } else {
+      console.info('[Auth] No bearer token — assuming open server. Pass #token=<RUVIEW_API_TOKEN> in URL if your server requires auth.');
+    }
+  }
+
   // Initialize application
   async init() {
     try {
       console.log('Initializing WiFi DensePose UI...');
-      
+
+      // Bearer auth bootstrap MUST run before any service makes a request,
+      // otherwise the first calls 401 against a hardened server.
+      this._bootstrapAuthToken();
+
       // Set up error handling
       this.setupErrorHandling();
-      
+
       // Initialize services
       await this.initializeServices();
       

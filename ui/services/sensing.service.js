@@ -112,7 +112,14 @@ class SensingService {
     this._setState('connecting');
 
     try {
-      this._ws = new WebSocket(SENSING_WS_URL);
+      // Bearer auth on /ws/* (hardened sensing-server). Browsers can't set
+      // arbitrary headers on `new WebSocket(...)`, so the token rides as a
+      // `Sec-WebSocket-Protocol: bearer.<token>` subprotocol — same trick
+      // kubectl exec uses. Token comes from app.js _bootstrapAuthToken().
+      const token = (typeof window !== 'undefined' && window.__RUVIEW_BEARER_TOKEN__) || '';
+      this._ws = token
+        ? new WebSocket(SENSING_WS_URL, [`bearer.${token}`])
+        : new WebSocket(SENSING_WS_URL);
     } catch (err) {
       console.warn('[Sensing] WebSocket constructor failed:', err.message);
       this._fallbackToSimulation();
