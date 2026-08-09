@@ -72,9 +72,19 @@ Python. Only running against silicon surfaced it. The trap is documented in
 
 ### Hardware verification — `MEASURED`
 
-Board: ESP32-S3-DevKitC-1-N16R8, MAC `44:1b:f6:ff:94:ac`, firmware built from
-this tree and flashed over USB. Uploads issued against `POST /wasm/upload` on
-port 8032. Captured from the serial log:
+Run twice on ESP32-S3-DevKitC-1-N16R8 hardware: once before the rebase, and
+again afterwards to confirm the same code still behaves identically now that
+it sits on upstream's PSA-based `rvf_parser.c` and reorganised CMake. Both
+runs flashed firmware built from this tree over USB and issued uploads
+against `POST /wasm/upload` on port 8032; verdicts are quoted from the serial
+log, not inferred from the HTTP status.
+
+| Run | Board MAC | Firmware | ESP-IDF | Tree |
+|-----|-----------|----------|---------|------|
+| A | `44:1b:f6:ff:94:ac` | v0.6.4 | 5.4 | pre-rebase (fork of 58cd860f) |
+| B | `44:1b:f6:fe:1e:0c` | v0.8.4 | 5.4 | post-rebase (this tree, on v2146) |
+
+Both runs produced identical results:
 
 | # | Input | Firmware log | HTTP |
 |---|-------|--------------|------|
@@ -87,8 +97,18 @@ port 8032. Captured from the serial log:
 Case 4 is the original attack: it is now rejected. Case 1's HTTP 500 comes
 from `wasm_runtime_load` returning `ESP_ERR_NOT_SUPPORTED` because the WASM3
 interpreter is behind a separate Kconfig (`W wasm_rt: WASM Tier 3 disabled`
-at boot); the signature itself verified. No stack-canary trips across the
-five uploads.
+at boot); the signature itself verified. Neither run produced a stack-canary
+trip, a panic, or a boot loop.
+
+Run B matters because a green `cargo check` cannot speak to firmware
+behaviour, and the rebase moved this code onto a substantially different
+base — upstream jumped the firmware from v0.4.3.1 to v0.8.4 across those 730
+commits. It is also how the BLAKE2b/SHA-512 mismatch was originally caught:
+host-side tests had Python on both ends and passed happily while the device
+rejected every valid signature.
+
+Raw serial logs for run B: `.local/phase-b/b1-rebased-boot.log` and
+`.local/phase-b/b1-matrix.log` (untracked; `.local/` is gitignored).
 
 ## What this fork still carries
 
