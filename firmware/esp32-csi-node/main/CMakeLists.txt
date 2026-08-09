@@ -17,6 +17,14 @@ set(SRCS
     "c6_sync_espnow.c"
     # ADR-110 B1/B2 unblock — soft-AP HE/TWT (C6-only when enabled)
     "c6_softap_he.c"
+    # Vendored Ed25519 — see third_party/monocypher/README.md.
+    # rvf_parser.c needs real RFC 8032 signature verification for signed WASM
+    # uploads; the previous SHA-256(pubkey || payload) scheme was forgeable by
+    # anyone holding the (public) public key. monocypher-ed25519.c is the
+    # SHA-512 variant that interoperates with libsodium / Python `cryptography`
+    # / openssl; monocypher.c supplies the scalar arithmetic it builds on.
+    "third_party/monocypher/monocypher.c"
+    "third_party/monocypher/monocypher-ed25519.c"
 )
 
 # ESP-IDF v6+: headers must resolve via explicit REQUIRES (no implicit deps).
@@ -64,7 +72,7 @@ endif()
 
 idf_component_register(
     SRCS ${SRCS}
-    INCLUDE_DIRS "."
+    INCLUDE_DIRS "." "third_party/monocypher"
     REQUIRES ${REQUIRES}
 )
 

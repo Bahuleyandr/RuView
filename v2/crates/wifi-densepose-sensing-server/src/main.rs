@@ -5702,8 +5702,11 @@ async fn info_page() -> Html<String> {
 
 // ── UDP receiver task ────────────────────────────────────────────────────────
 
-async fn udp_receiver_task(state: SharedState, udp_port: u16) {
-    let addr = format!("0.0.0.0:{udp_port}");
+async fn udp_receiver_task(state: SharedState, bind_ip: std::net::IpAddr, udp_port: u16) {
+    // Honour --bind-addr rather than always listening on every interface:
+    // unauthenticated CSI datagrams shape presence/vitals output, so a
+    // loopback-only deployment should not accept them from the LAN.
+    let addr = format!("{bind_ip}:{udp_port}");
     let socket = match UdpSocket::bind(&addr).await {
         Ok(s) => {
             info!("UDP listening on {addr} for ESP32, MediaTek, Qualcomm CSI, and RTL8720F radar frames");
@@ -8097,18 +8100,11 @@ async fn main() {
     // and the simulator serves poses in the meantime (it self-suspends once
     // promoted — see `simulated_data_task`). Explicit `--source simulated` has
     // `bind_udp = false`, so it serves simulated data only, with no live binding.
-    if plan.bind_udp {
-        tokio::spawn(udp_receiver_task(state.clone(), args.udp_port));
-        tokio::spawn(broadcast_tick_task(state.clone(), args.tick_ms));
-    }
-    if plan.run_wifi {
-        tokio::spawn(windows_wifi_task(state.clone(), args.tick_ms));
-    }
-    if plan.run_simulator {
-        tokio::spawn(simulated_data_task(state.clone(), args.tick_ms));
-    }
-
-    // ADR-166: Parse bind address once, use for all listeners
+    // ADR-166: Parse bind address once, use for all listeners.
+    //
+    // Parsed and auth-gated BEFORE any listener is spawned: the checks below
+    // can terminate the process, and binding the UDP CSI socket first would
+    // briefly expose it on a routable address before we decide to refuse.
     let bind_ip: std::net::IpAddr = args
         .bind_addr
         .parse()
@@ -8150,10 +8146,53 @@ async fn main() {
                 bind_ip
             );
         }
-    } else {
+    } else if bind_ip.is_loopback() {
         info!(
-            "API auth: OFF — /api/v1/* is unauthenticated. Set RUVIEW_API_TOKEN=<token> or RUVIEW_OAUTH_ISSUER=<issuer> to enforce auth."
+            "API auth: OFF — loopback bind only. Set RUVIEW_API_TOKEN=<token> or \
+             RUVIEW_OAUTH_ISSUER=<issuer> before exposing this server."
         );
+    } else if std::env::var("RUVIEW_ALLOW_OPEN")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+    {
+        warn!(
+            "API auth: OFF and bind-addr is {bind_ip}. RUVIEW_ALLOW_OPEN is set — starting anyway, \
+             but /api/v1/* and the biometric /ws/* streams are reachable anonymously on this network."
+        );
+    } else {
+        // Fail closed. A no-auth bind to a routable address publishes live
+        // biometric telemetry (presence, breathing rate, heart rate) and the
+        // write endpoints (model load, training start, calibration, recording)
+        // to anyone on the LAN. Warning and continuing means the operator finds
+        // out from someone else. Make the failure loud and the override explicit
+        // so the choice leaves a trace in the process environment.
+        error!(
+            "REFUSING TO START: bind-addr={bind_ip} is non-loopback but no API auth is configured.\n\
+             This server streams live biometric telemetry and accepts write endpoints.\n\
+             Choose one:\n\
+               * RUVIEW_API_TOKEN=<strong-token>  (or RUVIEW_OAUTH_ISSUER=<issuer>) — recommended\n\
+               * --bind-addr 127.0.0.1 — keep it loopback-only\n\
+               * RUVIEW_ALLOW_OPEN=1 — override (NOT recommended outside a trusted lab)"
+        );
+        std::process::exit(2);
+    }
+
+    // Start background tasks from the resolved plan (issue #1004).
+    //
+    // In `auto` mode with no boot source, `bind_udp` AND `run_simulator` are
+    // both true: the UDP receiver is bound so real CSI can promote the source,
+    // and the simulator serves poses in the meantime (it self-suspends once
+    // promoted — see `simulated_data_task`). Explicit `--source simulated` has
+    // `bind_udp = false`, so it serves simulated data only, with no live binding.
+    if plan.bind_udp {
+        tokio::spawn(udp_receiver_task(state.clone(), bind_ip, args.udp_port));
+        tokio::spawn(broadcast_tick_task(state.clone(), args.tick_ms));
+    }
+    if plan.run_wifi {
+        tokio::spawn(windows_wifi_task(state.clone(), args.tick_ms));
+    }
+    if plan.run_simulator {
+        tokio::spawn(simulated_data_task(state.clone(), args.tick_ms));
     }
 
     // DNS-rebinding defense: validate the `Host` header against an allowlist

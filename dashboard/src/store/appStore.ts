@@ -13,6 +13,13 @@ export type TransportMode = 'wasm' | 'ws';
 
 export const transport = signal<TransportMode>('wasm');
 export const wsUrl = signal<string>('');
+/**
+ * Bearer token for a hardened nvsim-server (`NVSIM_API_TOKEN` on the server
+ * side). Empty string ⇒ unauthenticated transport; otherwise sent as
+ * `Authorization: Bearer …` on REST and as `Sec-WebSocket-Protocol:
+ * bearer.<token>` on the WS handshake.
+ */
+export const apiToken = signal<string>('');
 export const connected = signal<boolean>(false);
 export const transportError = signal<string | null>(null);
 

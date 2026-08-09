@@ -132,7 +132,7 @@ pub use integration::{
 
 #[cfg(feature = "api")]
 #[cfg_attr(docsrs, doc(cfg(feature = "api")))]
-pub use api::{create_router, AppState};
+pub use api::{apply_bearer_auth, create_router, AppState, AuthState};
 
 #[cfg(feature = "ml")]
 pub use ml::{

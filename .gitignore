@@ -1,6 +1,12 @@
 # Local Claude config (contains WiFi credentials and machine-specific paths)
 CLAUDE.local.md
 
+# Local scratch for ephemeral artifacts: Ed25519 signing keypairs, test RVF
+# containers, generated WASM, resume scripts holding dev bearer tokens.
+# Nothing here is ever committed.
+.local/
+.tmp/
+
 # ESP32 firmware build artifacts and local config (contains WiFi credentials)
 firmware/esp32-csi-node/build/
 firmware/esp32-csi-node/sdkconfig

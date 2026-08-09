@@ -96,6 +96,8 @@ tokio-test = "0.4"
 criterion = { version = "0.5", features = ["html_reports"] }
 proptest = "1.4"
 approx = "0.5"
+# `tower::ServiceExt::oneshot` drives in-process Router tests in api::auth.
+tower = { workspace = true }
 
 [[bench]]
 name = "detection_bench"

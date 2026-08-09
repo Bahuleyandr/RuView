@@ -2,7 +2,7 @@
 import { LitElement, html, css } from 'lit';
 import { customElement, state } from 'lit/decorators.js';
 import { effect } from '@preact/signals-core';
-import { theme, density, motionReduced, autoUpdate, transport, wsUrl } from '../store/appStore';
+import { theme, density, motionReduced, autoUpdate, transport, wsUrl, apiToken } from '../store/appStore';
 
 @customElement('nv-settings-drawer')
 export class NvSettingsDrawer extends LitElement {
@@ -114,7 +114,7 @@ export class NvSettingsDrawer extends LitElement {
 
   override connectedCallback(): void {
     super.connectedCallback();
-    effect(() => { theme.value; density.value; motionReduced.value; autoUpdate.value; transport.value; wsUrl.value; this.requestUpdate(); });
+    effect(() => { theme.value; density.value; motionReduced.value; autoUpdate.value; transport.value; wsUrl.value; apiToken.value; this.requestUpdate(); });
     window.addEventListener('open-settings', () => { this.open = true; this.setAttribute('open', ''); });
   }
 
@@ -212,6 +212,14 @@ export class NvSettingsDrawer extends LitElement {
               </div>
               <input type="text" placeholder="ws://localhost:7878" .value=${wsUrl.value}
                 @input=${(e: Event) => wsUrl.value = (e.target as HTMLInputElement).value} />
+            </div>
+            <div class="row">
+              <div>
+                <div class="lbl">API token</div>
+                <div class="desc">Bearer token for a hardened server (NVSIM_API_TOKEN). Leave blank for open localhost servers.</div>
+              </div>
+              <input type="password" placeholder="paste token" autocomplete="off" .value=${apiToken.value}
+                @input=${(e: Event) => apiToken.value = (e.target as HTMLInputElement).value} />
             </div>` : ''}
         </div>
 

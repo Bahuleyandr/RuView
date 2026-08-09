@@ -12,6 +12,16 @@
 #include "esp_log.h"
 #include "psa/crypto.h"
 
+/* Vendored Ed25519. See main/third_party/monocypher/README.md for provenance,
+ * license, and why this is vendored rather than gated behind mbedTLS EdDSA.
+ *
+ * IMPORTANT: monocypher-ed25519.h (the "optional" module), NOT monocypher.h.
+ * The default crypto_eddsa_check() in monocypher.h is EdDSA with curve25519 +
+ * BLAKE2b — a non-standard hash that does NOT interoperate with RFC 8032
+ * Ed25519 (libsodium, NaCl, Python `cryptography`, openssl). This module is
+ * the SHA-512 variant every signer tool actually produces. */
+#include "monocypher-ed25519.h"
+
 static const char *TAG = "rvf";
 
 bool rvf_is_rvf(const uint8_t *data, uint32_t data_len)
@@ -188,54 +198,35 @@ esp_err_t rvf_verify_signature(const rvf_parsed_t *parsed, const uint8_t *data,
     uint32_t signed_len = RVF_HEADER_SIZE + RVF_MANIFEST_SIZE + parsed->wasm_len;
 
     /*
-     * Ed25519 verification.
+     * Real Ed25519 verification (RFC 8032 PureEd25519, SHA-512).
      *
-     * Legacy mbedtls Ed25519 is optional.  We use a SHA-256 keyed digest:
+     * History: this function used to compute
+     *     expected = SHA-256(pubkey || header || manifest || wasm)
+     * and compare the first 32 bytes of the "signature" field to that digest.
+     * Because the public key is by definition public, anyone holding it could
+     * recompute the digest and mint a "valid signature" for arbitrary payload
+     * bytes. That is tamper detection, not authentication — yet the comment
+     * claimed it stopped unauthorized publishers, which misled reviewers.
      *
-     *   expected = SHA-256(pubkey || signed_region)
+     * crypto_ed25519_check verifies the 64-byte signature over the signed
+     * region using only the 32-byte public key: 0 on success, -1 on any
+     * failure. Constant-time and allocation-free. Only the holder of the
+     * matching private key can produce a signature that verifies.
      *
-     * The first 32 bytes of the 64-byte signature field must match.
-     * This provides tamper detection and key-binding — a different
-     * pubkey produces a different expected hash, so unauthorized
-     * publishers cannot forge a valid signature.
+     * Signer side: scripts/sign-rvf.py (Python `cryptography`, RFC 8032).
+     * Public key reaches the device via `provision.py --wasm-pubkey <hex>`,
+     * landing in g_nvs_config.wasm_pubkey.
      *
-     * For full Ed25519, enable CONFIG_MBEDTLS_EDDSA_C or equivalent.
-     * The RVF builder should match this scheme.
+     * MEASURED on ESP32-S3 (board MAC 44:1b:f6:ff:94:ac): valid signature
+     * accepted; manifest-byte tamper, WASM-byte tamper, and wrong-key
+     * signature all rejected. See docs/SECURITY-AUDIT.md.
      */
-    uint8_t hash_input_prefix[32];
-    memcpy(hash_input_prefix, pubkey, 32);
-
-    /* Compute SHA-256(pubkey || header+manifest+wasm) via PSA Crypto. */
-    psa_hash_operation_t op = PSA_HASH_OPERATION_INIT;
-    psa_status_t st = psa_hash_setup(&op, PSA_ALG_SHA_256);
-    if (st != PSA_SUCCESS) {
-        return ESP_FAIL;
-    }
-    st = psa_hash_update(&op, hash_input_prefix, 32);
-    if (st != PSA_SUCCESS) {
-        (void)psa_hash_abort(&op);
-        return ESP_FAIL;
-    }
-    st = psa_hash_update(&op, data, signed_len);
-    if (st != PSA_SUCCESS) {
-        (void)psa_hash_abort(&op);
-        return ESP_FAIL;
-    }
-
-    uint8_t expected[32];
-    size_t out_len = 0;
-    st = psa_hash_finish(&op, expected, sizeof(expected), &out_len);
-    if (st != PSA_SUCCESS || out_len != 32) {
-        (void)psa_hash_abort(&op);
-        return ESP_FAIL;
-    }
-
-    /* Compare first 32 bytes of signature against expected hash. */
-    if (memcmp(parsed->signature, expected, 32) != 0) {
-        ESP_LOGE(TAG, "Signature verification failed — key mismatch or tampered");
+    int rc = crypto_ed25519_check(parsed->signature, pubkey, data, signed_len);
+    if (rc != 0) {
+        ESP_LOGE(TAG, "Ed25519 signature verification failed");
         return ESP_ERR_INVALID_CRC;
     }
 
-    ESP_LOGI(TAG, "Signature verified (SHA-256-HMAC keyed integrity)");
+    ESP_LOGI(TAG, "Ed25519 signature verified");
     return ESP_OK;
 }

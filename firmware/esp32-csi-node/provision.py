@@ -79,6 +79,7 @@ CONFIG_VALUE_CHECKS = [
     ("zone", lambda value: value is not None),
     ("swarm_hb", lambda value: value is not None),
     ("swarm_ingest", lambda value: value is not None),
+    ("wasm_pubkey", lambda value: value is not None),
 ]
 
 
@@ -108,6 +109,7 @@ MERGEABLE_ATTRS = [
     "channel", "filter_mac",
     "hop_channels", "hop_dwell",
     "seed_url", "seed_token", "zone", "swarm_hb", "swarm_ingest",
+    "wasm_pubkey",
 ]
 
 
@@ -234,6 +236,16 @@ def build_nvs_csv(args):
         writer.writerow(["swarm_hb", "data", "u16", str(args.swarm_hb)])
     if args.swarm_ingest is not None:
         writer.writerow(["swarm_ingest", "data", "u16", str(args.swarm_ingest)])
+    # Ed25519 public key used by rvf_parser.c to verify signed WASM uploads.
+    # 32 bytes, hex on the CLI, stored as a blob the firmware reads straight
+    # into g_nvs_config.wasm_pubkey.
+    if args.wasm_pubkey is not None:
+        pk = bytes.fromhex(args.wasm_pubkey)
+        if len(pk) != 32:
+            raise ValueError(
+                f"--wasm-pubkey must be 32 bytes hex (64 chars), got {len(pk)} bytes"
+            )
+        writer.writerow(["wasm_pubkey", "data", "hex2bin", pk.hex()])
     return buf.getvalue()
 
 
@@ -354,6 +366,9 @@ def main():
     parser.add_argument("--zone", type=str, help="Zone name for this node (e.g. lobby, hallway)")
     parser.add_argument("--swarm-hb", type=int, help="Swarm heartbeat interval in seconds (default 30)")
     parser.add_argument("--swarm-ingest", type=int, help="Swarm vector ingest interval in seconds (default 5)")
+    parser.add_argument("--wasm-pubkey", type=str,
+                        help="Ed25519 public key (64-char hex, 32 bytes) used to verify signed "
+                             "WASM uploads. Generate with: python scripts/sign-rvf.py gen-keypair --out keys.json")
     parser.add_argument("--dry-run", action="store_true", help="Generate NVS binary but don't flash")
     parser.add_argument("--force-partial", action="store_true",
                         help="[deprecated since #391/#574] Suppress the missing-WiFi-trio "

@@ -11534,6 +11534,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tokio-test",
+ "tower 0.4.13",
  "tracing",
  "uuid",
  "wifi-densepose-core",
